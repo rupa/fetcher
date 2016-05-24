@@ -1,14 +1,28 @@
 import pycurl
-import sys
-import time
 
 from cStringIO import StringIO
 
 
-def fetch(requests, concurrent=50, timeout_ms=1000, follow_redirects=True):
+def fetch(requests, concurrent=50, timeout_ms=1000, follow_redirects=True,
+          curlopts=None):
+  """
+  requests argument is a generator with the following structure:
+
+    (url, echo_field)            - for GET requests
+    (url, echo_field, post_data) - for POST requests
+
+  curlopts allows arbitrary options to be passed to pycurl.setopt. It is a list
+  of two-tuples, eg:
+
+    (pycurl.HTTPHEADER, ['Content-Type', 'application/javascript'])
+
+  responses:
+    success: (True, (echo_field, server_response))
+      error: (False, (echo_field, error, effective_URL))
+  """
   multi = pycurl.CurlMulti()
 
-  # Sadly, we need to track of pending curls, or they'll get CG'd and
+  # Sadly, we need to track of pending curls, or they'll get GC'd and
   # mysteriously disappear. Don't ask me!
   curls            = []
   num_handles       = 0
@@ -18,11 +32,20 @@ def fetch(requests, concurrent=50, timeout_ms=1000, follow_redirects=True):
     # If the concurrency cap hasn't been reached yet, another request can be
     # pulled off and added to the multi.
     if unscheduled_reqs and num_handles < concurrent:
+
       try:
-        url, payload = requests.next()
+        request = requests.next()
       except StopIteration:
         unscheduled_reqs = False
         continue
+
+      if len(request) == 3:
+        url, payload, post_data = request
+      elif len(request) == 2:
+        url, payload = request
+        post_data = None
+      else:
+        raise Exception('Bad request: {}'.format(repr(request)))
 
       body = StringIO()
 
@@ -31,13 +54,17 @@ def fetch(requests, concurrent=50, timeout_ms=1000, follow_redirects=True):
       curl.setopt(pycurl.WRITEFUNCTION, body.write)
       curl.setopt(pycurl.TIMEOUT_MS, timeout_ms)
       curl.setopt(pycurl.CONNECTTIMEOUT_MS, timeout_ms)
+      curl.setopt(pycurl.FOLLOWLOCATION, 1 if follow_redirects else 0)
       curl.setopt(pycurl.USERAGENT, 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64;' +\
         ' rv:21.0) Gecko/20100101 Firefox/21.0')
 
-      if follow_redirects:
-        curl.setopt(pycurl.FOLLOWLOCATION, 1)
-      else:
-        curl.setopt(pycurl.FOLLOWLOCATION, 0)
+      # arbitrary options
+      if curlopts is not None:
+        for option, value in curlopts:
+          curl.setopt(option, value)
+
+      if post_data is not None:
+        curl.setopt(pycurl.POSTFIELDS, post_data)
 
       curl.body    = body
       curl.payload = payload
@@ -72,18 +99,3 @@ def fetch(requests, concurrent=50, timeout_ms=1000, follow_redirects=True):
 
       if not num_q:
         break
-
-def main(count, url):
-  print 'Getting %s from %s' % (count, url)
-
-  requests = ((url, 'req-%s' % i) for i in range(count))
-  start =  time.time()
-  for ok, resp in fetch(requests, concurrent=100):
-    print ok, resp
-  delta = time.time() - start
-  print '%.02f req/s' % (count / delta)
-
-if __name__ == '__main__':
-  count = int(sys.argv[1])
-  url   = sys.argv[2]
-  sys.exit(main(count, url))
